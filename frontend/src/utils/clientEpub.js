@@ -24,7 +24,7 @@ export async function extractFromFile(file) {
 
   if (ext === "docx") {
     try {
-      const mammoth = await import("mammoth/mammoth.browser");
+      const mammoth = await import("mammoth");
       const arrayBuffer = await file.arrayBuffer();
       const [htmlResult, textResult] = await Promise.all([
         mammoth.convertToHtml({ arrayBuffer }),
@@ -39,8 +39,9 @@ export async function extractFromFile(file) {
   if (ext === "pdf") {
     try {
       const pdfjsLib = await import("pdfjs-dist");
-      // PDF.js worker 설정
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+      // PDF.js worker 설정 (버전 고정으로 CDN 매칭 보장)
+      const ver = pdfjsLib.version || "4.0.379";
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${ver}/pdf.worker.min.js`;
       const arrayBuffer = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
       let fullText = "";
