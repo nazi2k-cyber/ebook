@@ -1,5 +1,6 @@
-# 환경변수 (절대 커밋하지 마세요!)
-.env
+# 환경변수 (실제 키가 있는 .env는 커밋 금지)
+# .env는 개발용 기본값만 포함하여 커밋 (프라이빗 키/API키 없는 버전)
+.env.production
 .env.local
 .env.*.local
 
