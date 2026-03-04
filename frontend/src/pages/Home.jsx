@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { useDropzone } from "react-dropzone";
 import { ethers } from "ethers";
-import axios from "axios";
 import toast from "react-hot-toast";
+import { generateEpubClient } from "../utils/clientEpub";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Upload, BookOpen, Zap, Globe, Sparkles, Check, Loader,
@@ -203,11 +203,8 @@ function QuickConvert({ onEpubReady }) {
   const [step, setStep] = useState(0); // 0: 업로드, 1: 정보 입력, 2: 완료
   const [docFile, setDocFile] = useState(null);
   const [coverFile, setCoverFile] = useState(null);
-  const [uploadedDoc, setUploadedDoc] = useState(null);
-  const [uploadedCover, setUploadedCover] = useState(null);
-  const [preview, setPreview] = useState(null);
   const [epubResult, setEpubResult] = useState(null);
-  const [ipfsResult, setIpfsResult] = useState(null);
+  const [epubBlobUrl, setEpubBlobUrl] = useState(null);
   const [mintedId, setMintedId] = useState(null);
   const [processing, setProcessing] = useState(false);
   const [form, setForm] = useState({
@@ -215,40 +212,21 @@ function QuickConvert({ onEpubReady }) {
     language: "ko", royaltyPercent: 1000, isLimitedEdition: false, totalEditions: 100,
   });
 
-  const onDocDrop = useCallback(async (files) => {
+  const onDocDrop = useCallback((files) => {
     const file = files[0];
     if (!file) return;
     setDocFile(file);
-    const tid = toast.loading("업로드 중...");
-    try {
-      const fd = new FormData();
-      fd.append("document", file);
-      const res = await axios.post("/api/upload/document", fd);
-      setUploadedDoc(res.data.file);
-      toast.success("업로드 완료!", { id: tid });
-      // 자동 미리보기
-      const pres = await axios.post("/api/ebook/preview", { filePath: res.data.file.path, mimeType: res.data.file.mimetype });
-      setPreview(pres.data);
-      // 파일명에서 제목 자동 추출
-      const auto = file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
-      setForm(f => ({ ...f, title: f.title || auto }));
-      setStep(1);
-    } catch (e) {
-      toast.error(e.response?.data?.error || e.message, { id: tid });
-    }
+    const auto = file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
+    setForm(f => ({ ...f, title: f.title || auto }));
+    toast.success(`"${file.name}" 선택됨`);
+    setStep(1);
   }, []);
 
-  const onCoverDrop = useCallback(async (files) => {
+  const onCoverDrop = useCallback((files) => {
     const file = files[0];
     if (!file) return;
     setCoverFile(file);
-    const fd = new FormData();
-    fd.append("cover", file);
-    try {
-      const res = await axios.post("/api/upload/cover", fd);
-      setUploadedCover(res.data.cover);
-      toast.success("표지 업로드 완료!");
-    } catch { toast.error("표지 업로드 실패"); }
+    toast.success("표지 이미지 선택됨");
   }, []);
 
   const { getRootProps: docRP, getInputProps: docIP, isDragActive: docDrag } = useDropzone({
@@ -269,61 +247,36 @@ function QuickConvert({ onEpubReady }) {
     setProcessing(true);
     const tid = toast.loading("EPUB 생성 중...");
     try {
-      const res = await axios.post("/api/ebook/generate", {
-        filePath: uploadedDoc.path, mimeType: uploadedDoc.mimetype,
-        coverImagePath: uploadedCover?.path || null, ...form,
+      const result = await generateEpubClient(docFile, {
+        title: form.title, author: form.author, genre: form.genre,
+        description: form.description, language: form.language,
+        coverFile: coverFile || null,
       });
-      setEpubResult(res.data.epub);
-      toast.success(`EPUB 완성! (${res.data.epub.chapters}챕터)`, { id: tid });
+      setEpubResult(result);
+      const blobUrl = URL.createObjectURL(result.blob);
+      setEpubBlobUrl(blobUrl);
+      toast.success(`EPUB 완성! (${result.chapters}챕터)`, { id: tid });
       setStep(2);
-      onEpubReady?.(res.data.epub);
+      onEpubReady?.(result);
     } catch (e) {
-      toast.error(e.response?.data?.error || e.message, { id: tid });
+      toast.error(e.message, { id: tid });
     } finally { setProcessing(false); }
   };
 
-  const uploadAndMint = async () => {
-    if (!account) return toast.error("지갑을 먼저 연결하세요.");
-    setProcessing(true);
-    const tid = toast.loading("IPFS 업로드 중...");
-    try {
-      const epubRes = await axios.post("/api/ipfs/upload-epub", {
-        filename: epubResult.filename, title: form.title, author: form.author,
-      });
-      const metaRes = await axios.post("/api/ipfs/upload-metadata", {
-        metadata: { ...form, epubIpfsHash: epubRes.data.ipfsHash, publisher: `${form.author} 독립출판` },
-      });
-      setIpfsResult({ epub: epubRes.data, meta: metaRes.data });
-      toast.success("IPFS 완료!", { id: tid });
-
-      if (!contracts.nft) {
-        toast("NFT 발행: 컨트랙트 미연결 (데모 모드)", { icon: "⚠️" });
-        setMintedId("DEMO");
-        return;
-      }
-      toast.loading("NFT 민팅 중... MetaMask 승인 필요", { id: tid });
-      const ebookMeta = {
-        title: form.title, author: form.author, genre: form.genre,
-        description: form.description, epubIpfsHash: epubRes.data.ipfsHash,
-        coverIpfsHash: "", publishedAt: 0n,
-        totalEditions: BigInt(form.isLimitedEdition ? form.totalEditions : 0),
-        mintedCount: 0n, isLimitedEdition: form.isLimitedEdition,
-      };
-      const tx = await contracts.nft.mintEbook(account, metaRes.data.metadataUrl, ebookMeta, form.royaltyPercent);
-      const receipt = await tx.wait();
-      const ev = receipt.logs.find(l => { try { return contracts.nft.interface.parseLog(l)?.name === "EbookMinted"; } catch { return false; } });
-      const tokenId = ev ? contracts.nft.interface.parseLog(ev).args.tokenId : "?";
-      setMintedId(tokenId.toString());
-      toast.success(`NFT 발행 완료! Token #${tokenId}`, { id: tid });
-    } catch (e) {
-      toast.error(e.code === 4001 ? "거래 취소됨" : e.message, { id: tid });
-    } finally { setProcessing(false); }
+  const handleDownload = () => {
+    if (!epubBlobUrl || !epubResult) return;
+    const a = document.createElement("a");
+    a.href = epubBlobUrl;
+    a.download = epubResult.filename;
+    a.click();
+    toast.success("다운로드 시작!");
   };
 
   const reset = () => {
-    setStep(0); setDocFile(null); setCoverFile(null); setUploadedDoc(null);
-    setUploadedCover(null); setPreview(null); setEpubResult(null);
-    setIpfsResult(null); setMintedId(null); setProcessing(false);
+    if (epubBlobUrl) URL.revokeObjectURL(epubBlobUrl);
+    setStep(0); setDocFile(null); setCoverFile(null);
+    setEpubResult(null); setEpubBlobUrl(null);
+    setMintedId(null); setProcessing(false);
     setForm({ title: "", author: "", genre: "소설", description: "", language: "ko", royaltyPercent: 1000, isLimitedEdition: false, totalEditions: 100 });
   };
 
@@ -357,14 +310,8 @@ function QuickConvert({ onEpubReady }) {
           <motion.div key="s1" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
             <div className="qc-file-info">
               <FileText size={16}/> {docFile?.name}
-              {preview && <span className="qc-preview-badge">약 {preview.estimatedPages}페이지</span>}
+              {coverFile && <span className="qc-preview-badge">{coverFile.name}</span>}
             </div>
-
-            {preview && (
-              <div className="qc-preview-text">
-                <p>{preview.preview}</p>
-              </div>
-            )}
 
             <div className="qc-form-row">
               <div className="form-group">
@@ -437,45 +384,30 @@ function QuickConvert({ onEpubReady }) {
                   <div className="qc-result-icon"><Check size={28}/></div>
                   <div>
                     <p className="qc-result-title">{form.title}</p>
-                    <p className="qc-result-meta">{epubResult.chapters}챕터 · {(epubResult.fileSize / 1024).toFixed(1)}KB</p>
+                    <p className="qc-result-meta">{epubResult.chapters}챕터 · {(epubResult.blob.size / 1024).toFixed(1)}KB</p>
                   </div>
                 </div>
 
                 <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                  <a href={epubResult.downloadUrl} download={`${form.title || "ebook"}.epub`}
-                    className="btn btn-secondary" style={{ flex: 1, justifyContent: "center" }}>
-                    <Download size={15}/> EPUB 다운로드
-                  </a>
                   <button className="btn btn-secondary" style={{ flex: 1, justifyContent: "center" }}
-                    onClick={async () => {
-                      try {
-                        // blob URL로 변환하여 epub.js에 전달 (CORS 우회)
-                        const res = await fetch(epubResult.downloadUrl);
-                        const blob = await res.blob();
-                        const blobUrl = URL.createObjectURL(blob);
-                        window.dispatchEvent(new CustomEvent("openReader", { detail: { url: blobUrl, title: form.title } }));
-                      } catch {
-                        window.dispatchEvent(new CustomEvent("openReader", { detail: { url: epubResult.downloadUrl, title: form.title } }));
+                    onClick={handleDownload}>
+                    <Download size={15}/> EPUB 다운로드
+                  </button>
+                  <button className="btn btn-secondary" style={{ flex: 1, justifyContent: "center" }}
+                    onClick={() => {
+                      if (epubBlobUrl) {
+                        window.dispatchEvent(new CustomEvent("openReader", { detail: { url: epubBlobUrl, title: form.title } }));
                       }
                     }}>
                     <Eye size={15}/> 미리 읽기
                   </button>
                 </div>
 
-                {ipfsResult && (
-                  <div className="qc-ipfs-info">
-                    <p>IPFS: <code>{ipfsResult.epub.ipfsHash?.slice(0, 24)}...</code>
-                    {ipfsResult.epub.isDemoMode && <span className="qc-demo-tag">Demo</span>}</p>
-                  </div>
-                )}
-
                 <button className="btn btn-primary" style={{ width: "100%", justifyContent: "center" }}
-                  onClick={account ? uploadAndMint : connectWallet} disabled={processing || !!mintedId}>
-                  {processing
-                    ? <><Loader size={16} className="spin"/> 처리 중...</>
-                    : account
-                    ? <><Zap size={16}/> IPFS 저장 + NFT 발행 (선택)</>
-                    : <><Wallet size={16}/> 지갑 연결 후 NFT 발행</>}
+                  onClick={connectWallet} disabled={!!account}>
+                  {account
+                    ? <><Check size={16}/> 지갑 연결됨 — NFT 거래소에서 판매 등록 가능</>
+                    : <><Wallet size={16}/> 지갑 연결 후 NFT 발행 (선택)</>}
                 </button>
 
                 <button className="qc-reset-btn" onClick={reset}><RefreshCw size={13}/> 다른 작품 출판</button>

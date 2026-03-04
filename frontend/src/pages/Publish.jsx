@@ -1,811 +1,429 @@
 import React, { useState, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
-import axios from "axios";
 import toast from "react-hot-toast";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Upload, FileText, Image, BookOpen, Zap, Check,
-  ChevronRight, AlertCircle, Loader, ExternalLink
+  Upload, FileText, Image, BookOpen, Download, Check,
+  ChevronRight, ChevronLeft, Loader, Wallet,
 } from "lucide-react";
-import { ethers } from "ethers";
+import { generateEpubClient } from "../utils/clientEpub";
 import { useWeb3 } from "../context/Web3Context";
 
 const GENRES = ["시", "소설", "수필/에세이", "희곡", "동화", "SF", "판타지", "로맨스", "미스터리", "자기계발", "인문학", "기타"];
-const STEPS = ["문서 업로드", "도서 정보", "EPUB 생성", "NFT 발행"];
-
-const ROYALTY_OPTIONS = [
-  { label: "5%", value: 500 },
-  { label: "8%", value: 800 },
-  { label: "10%", value: 1000 },
-  { label: "15%", value: 1500 },
-];
+const STEPS = ["문서 업로드", "도서 정보 입력", "EPUB 완성"];
 
 export default function Publish() {
-  const { account, contracts, connectWallet } = useWeb3();
-  const [currentStep, setCurrentStep] = useState(0);
+  const { account, connectWallet } = useWeb3();
+  const [step, setStep] = useState(0);
 
-  // 파일 상태
   const [docFile, setDocFile] = useState(null);
   const [coverFile, setCoverFile] = useState(null);
-  const [uploadedDoc, setUploadedDoc] = useState(null);
-  const [uploadedCover, setUploadedCover] = useState(null);
-  const [preview, setPreview] = useState(null);
+  const [coverPreviewUrl, setCoverPreviewUrl] = useState(null);
 
-  // 메타데이터
-  const [metadata, setMetadata] = useState({
+  const [form, setForm] = useState({
     title: "",
     author: "",
     genre: "소설",
     description: "",
     language: "ko",
-    publisherName: "",
-    isLimitedEdition: false,
-    totalEditions: 100,
-    royaltyPercent: 1000,
   });
 
-  // 결과
   const [epubResult, setEpubResult] = useState(null);
-  const [ipfsResult, setIpfsResult] = useState(null);
-  const [mintedTokenId, setMintedTokenId] = useState(null);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
 
-  // 문서 드롭존
-  const onDocDrop = useCallback(async (acceptedFiles) => {
-    const file = acceptedFiles[0];
+  // ── 문서 드롭존 ──────────────────────────────────────
+  const onDocDrop = useCallback((files) => {
+    const file = files[0];
     if (!file) return;
     setDocFile(file);
-
-    const toastId = toast.loading("파일 업로드 중...");
-    try {
-      const formData = new FormData();
-      formData.append("document", file);
-      const res = await axios.post("/api/upload/document", formData);
-      setUploadedDoc(res.data.file);
-      toast.success("파일 업로드 완료!", { id: toastId });
-
-      // 미리보기 추출
-      const previewRes = await axios.post("/api/ebook/preview", {
-        filePath: res.data.file.path,
-        mimeType: res.data.file.mimetype,
-      });
-      setPreview(previewRes.data);
-    } catch (err) {
-      toast.error(`업로드 실패: ${err.response?.data?.error || err.message}`, { id: toastId });
-    }
+    const autoTitle = file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
+    setForm(f => ({ ...f, title: f.title || autoTitle }));
+    toast.success(`"${file.name}" 선택됨`);
+    setStep(1);
   }, []);
 
-  // 표지 드롭존
-  const onCoverDrop = useCallback(async (acceptedFiles) => {
-    const file = acceptedFiles[0];
-    if (!file) return;
-    setCoverFile(file);
-    const formData = new FormData();
-    formData.append("cover", file);
-    try {
-      const res = await axios.post("/api/upload/cover", formData);
-      setUploadedCover(res.data.cover);
-      toast.success("표지 이미지 업로드 완료!");
-    } catch (err) {
-      toast.error("표지 업로드 실패");
-    }
-  }, []);
-
-  const { getRootProps: getDocRootProps, getInputProps: getDocInputProps, isDragActive: isDocDrag } = useDropzone({
+  const { getRootProps: docRP, getInputProps: docIP, isDragActive: docDrag } = useDropzone({
     onDrop: onDocDrop,
     accept: {
       "text/plain": [".txt"],
-      "application/pdf": [".pdf"],
-      "application/msword": [".doc"],
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
       "text/markdown": [".md"],
+      "application/pdf": [".pdf"],
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+      "text/html": [".html", ".htm"],
     },
     maxFiles: 1,
   });
 
-  const { getRootProps: getCoverRootProps, getInputProps: getCoverInputProps, isDragActive: isCoverDrag } = useDropzone({
+  // ── 표지 드롭존 ──────────────────────────────────────
+  const onCoverDrop = useCallback((files) => {
+    const file = files[0];
+    if (!file) return;
+    setCoverFile(file);
+    setCoverPreviewUrl(URL.createObjectURL(file));
+    toast.success("표지 이미지 선택됨");
+  }, []);
+
+  const { getRootProps: covRP, getInputProps: covIP } = useDropzone({
     onDrop: onCoverDrop,
     accept: { "image/*": [".jpg", ".jpeg", ".png", ".webp"] },
     maxFiles: 1,
   });
 
-  // STEP 2 → 3: EPUB 생성
-  const generateEpub = async () => {
-    if (!uploadedDoc) return toast.error("먼저 문서를 업로드해주세요.");
-    if (!metadata.title || !metadata.author) return toast.error("제목과 저자명을 입력해주세요.");
-
-    setIsProcessing(true);
-    const toastId = toast.loading("EPUB 생성 중...");
+  // ── EPUB 생성 ─────────────────────────────────────────
+  const handleGenerate = async () => {
+    if (!form.title.trim() || !form.author.trim()) {
+      toast.error("제목과 저자명을 입력하세요.");
+      return;
+    }
+    setIsGenerating(true);
+    const tid = toast.loading("EPUB 생성 중...");
     try {
-      const res = await axios.post("/api/ebook/generate", {
-        filePath: uploadedDoc.path,
-        mimeType: uploadedDoc.mimetype,
-        coverImagePath: uploadedCover?.path || null,
-        ...metadata,
+      const result = await generateEpubClient(docFile, {
+        title: form.title,
+        author: form.author,
+        genre: form.genre,
+        description: form.description,
+        language: form.language,
+        coverFile: coverFile || null,
       });
-      setEpubResult(res.data.epub);
-      toast.success(`EPUB 생성 완료! (${res.data.epub.chapters}개 챕터)`, { id: toastId });
-      setCurrentStep(2);
-    } catch (err) {
-      toast.error(`EPUB 생성 실패: ${err.response?.data?.error || err.message}`, { id: toastId });
+      setEpubResult(result);
+      toast.success(`완성! ${result.chapters}개 챕터`, { id: tid });
+      setStep(2);
+    } catch (e) {
+      toast.error(`생성 실패: ${e.message}`, { id: tid });
     } finally {
-      setIsProcessing(false);
+      setIsGenerating(false);
     }
   };
 
-  // STEP 3 → 4: IPFS 업로드 + NFT 발행
-  const uploadToIPFS = async () => {
+  // ── EPUB 다운로드 ─────────────────────────────────────
+  const handleDownload = () => {
     if (!epubResult) return;
-    setIsProcessing(true);
-    const toastId = toast.loading("IPFS에 업로드 중...");
-
-    try {
-      // 1. EPUB → IPFS
-      const epubRes = await axios.post("/api/ipfs/upload-epub", {
-        filename: epubResult.filename,
-        title: metadata.title,
-        author: metadata.author,
-      });
-
-      // 2. 메타데이터 → IPFS
-      const metaRes = await axios.post("/api/ipfs/upload-metadata", {
-        metadata: {
-          title: metadata.title,
-          author: metadata.author,
-          genre: metadata.genre,
-          description: metadata.description,
-          language: metadata.language,
-          epubIpfsHash: epubRes.data.ipfsHash,
-          coverIpfsUrl: uploadedCover ? `https://gateway.pinata.cloud/ipfs/${uploadedCover.ipfsHash || ""}` : "",
-          edition: metadata.isLimitedEdition ? "한정판" : "일반판",
-          totalEditions: metadata.isLimitedEdition ? metadata.totalEditions : "무제한",
-          publisher: metadata.publisherName || `${metadata.author} 독립출판`,
-        },
-      });
-
-      setIpfsResult({ epub: epubRes.data, meta: metaRes.data });
-      toast.success("IPFS 업로드 완료!", { id: toastId });
-      setCurrentStep(3);
-    } catch (err) {
-      toast.error(`IPFS 업로드 실패: ${err.response?.data?.error || err.message}`, { id: toastId });
-    } finally {
-      setIsProcessing(false);
-    }
+    const url = URL.createObjectURL(epubResult.blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = epubResult.filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success("다운로드 시작!");
   };
 
-  // NFT 민팅
-  const mintNFT = async () => {
-    if (!account) return toast.error("지갑을 먼저 연결해주세요.");
-    if (!contracts.nft) return toast.error("컨트랙트가 연결되지 않았습니다. 올바른 네트워크를 확인하세요.");
-    if (!ipfsResult) return toast.error("먼저 IPFS 업로드를 완료해주세요.");
-
-    setIsProcessing(true);
-    const toastId = toast.loading("NFT 민팅 중... MetaMask에서 승인해주세요.");
-    try {
-      const ebookMetadata = {
-        title: metadata.title,
-        author: metadata.author,
-        genre: metadata.genre,
-        description: metadata.description,
-        epubIpfsHash: ipfsResult.epub.ipfsHash,
-        coverIpfsHash: "",
-        publishedAt: 0n,
-        totalEditions: BigInt(metadata.isLimitedEdition ? metadata.totalEditions : 0),
-        mintedCount: 0n,
-        isLimitedEdition: metadata.isLimitedEdition,
-      };
-
-      const tx = await contracts.nft.mintEbook(
-        account,
-        ipfsResult.meta.metadataUrl || `ipfs://${ipfsResult.meta.ipfsHash}`,
-        ebookMetadata,
-        metadata.royaltyPercent
-      );
-
-      toast.loading("트랜잭션 확인 중...", { id: toastId });
-      const receipt = await tx.wait();
-
-      // 이벤트에서 tokenId 추출
-      const event = receipt.logs.find(log => {
-        try {
-          const parsed = contracts.nft.interface.parseLog(log);
-          return parsed?.name === "EbookMinted";
-        } catch { return false; }
-      });
-
-      const tokenId = event
-        ? contracts.nft.interface.parseLog(event).args.tokenId
-        : "?";
-
-      setMintedTokenId(tokenId.toString());
-      toast.success(`🎉 NFT 발행 완료! Token ID: ${tokenId}`, { id: toastId });
-    } catch (err) {
-      if (err.code === 4001) {
-        toast.error("사용자가 트랜잭션을 거부했습니다.", { id: toastId });
-      } else {
-        toast.error(`민팅 실패: ${err.message}`, { id: toastId });
-      }
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const updateMeta = (field, value) => setMetadata(prev => ({ ...prev, [field]: value }));
+  const setField = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   return (
-    <div className="publish-page container">
-      <div className="publish-header">
-        <h1>작품 출판하기</h1>
-        <p>창작 문서를 EPUB으로 변환하고 NFT로 저작권을 등록하세요</p>
+    <div style={{ maxWidth: 720, margin: "0 auto", padding: "48px 24px 80px" }}>
+      {/* 헤더 */}
+      <div style={{ textAlign: "center", marginBottom: 40 }}>
+        <h1 style={{ fontSize: "2rem", fontWeight: 700, fontFamily: "var(--font-serif)", marginBottom: 10 }}>
+          내 글을 EPUB으로 만들기
+        </h1>
+        <p style={{ color: "#a5b4fc" }}>TXT · MD · DOCX · PDF · HTML → 전자책(EPUB) 무료 변환</p>
+        <p style={{ color: "#6b7280", fontSize: "0.82rem", marginTop: 4 }}>파일이 서버로 전송되지 않습니다</p>
       </div>
 
-      {/* 단계 표시기 */}
-      <div className="step-indicator">
-        {STEPS.map((step, i) => (
-          <React.Fragment key={step}>
-            <div className={`step-dot ${i <= currentStep ? "active" : ""} ${i < currentStep ? "done" : ""}`}>
-              {i < currentStep ? <Check size={14} /> : <span>{i + 1}</span>}
-              <div className="step-dot-label">{step}</div>
+      {/* 스텝 인디케이터 */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 40 }}>
+        {STEPS.map((label, i) => (
+          <React.Fragment key={i}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+              <div style={{
+                width: 36, height: 36, borderRadius: "50%",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontWeight: 700, fontSize: "0.9rem",
+                background: i < step ? "#10b981" : i === step ? "#6366f1" : "rgba(255,255,255,0.07)",
+                color: i <= step ? "#fff" : "#6b7280",
+                border: i === step ? "2px solid #818cf8" : "2px solid transparent",
+                transition: "all 0.3s",
+              }}>
+                {i < step ? <Check size={16} /> : i + 1}
+              </div>
+              <span style={{ fontSize: "0.72rem", color: i === step ? "#a5b4fc" : "#6b7280", whiteSpace: "nowrap" }}>
+                {label}
+              </span>
             </div>
             {i < STEPS.length - 1 && (
-              <div className={`step-line ${i < currentStep ? "done" : ""}`} />
+              <div style={{
+                height: 2, width: 48, margin: "0 6px", marginBottom: 22,
+                background: i < step ? "#10b981" : "rgba(255,255,255,0.1)",
+                transition: "background 0.3s",
+              }} />
             )}
           </React.Fragment>
         ))}
       </div>
 
-      <div className="publish-layout">
-        {/* 왼쪽: 단계별 콘텐츠 */}
-        <div className="publish-main">
-          <AnimatePresence mode="wait">
-            {/* STEP 0: 문서 업로드 */}
-            {currentStep === 0 && (
-              <motion.div key="step0" className="step-content glass-card"
-                initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
-                <h2 className="step-title"><FileText size={22} /> 문서 업로드</h2>
-                <p className="step-desc">TXT, DOCX, PDF, MD 형식의 창작 문서를 업로드하세요.</p>
+      <AnimatePresence mode="wait">
 
-                <div {...getDocRootProps()} className={`dropzone ${isDocDrag ? "drag-active" : ""} ${uploadedDoc ? "has-file" : ""}`}>
-                  <input {...getDocInputProps()} />
-                  {uploadedDoc ? (
-                    <div className="drop-success">
-                      <Check size={32} className="drop-check" />
-                      <p>{docFile?.name}</p>
-                      <span>{(docFile?.size / 1024).toFixed(1)} KB</span>
-                    </div>
-                  ) : (
-                    <div className="drop-prompt">
-                      <Upload size={40} className="drop-icon" />
-                      <p>파일을 드래그하거나 <strong>클릭</strong>하여 선택</p>
-                      <span>.txt · .docx · .pdf · .md</span>
-                    </div>
-                  )}
-                </div>
-
-                {preview && (
-                  <div className="preview-box">
-                    <h4>미리보기 ({preview.estimatedPages}페이지 예상)</h4>
-                    <p>{preview.preview}</p>
-                  </div>
-                )}
-
-                <div className="cover-section">
-                  <h3><Image size={18} /> 표지 이미지 (선택)</h3>
-                  <div {...getCoverRootProps()} className={`dropzone cover-dropzone ${isCoverDrag ? "drag-active" : ""}`}>
-                    <input {...getCoverInputProps()} />
-                    {uploadedCover ? (
-                      <div className="drop-success">
-                        <Check size={24} className="drop-check" />
-                        <span>표지 업로드 완료</span>
-                      </div>
-                    ) : (
-                      <div className="drop-prompt">
-                        <Image size={28} className="drop-icon" />
-                        <span>표지 이미지 (JPG, PNG)</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <button
-                  className="btn btn-primary step-next-btn"
-                  onClick={() => setCurrentStep(1)}
-                  disabled={!uploadedDoc}
-                >
-                  다음: 도서 정보 입력 <ChevronRight size={18} />
-                </button>
-              </motion.div>
-            )}
-
-            {/* STEP 1: 도서 정보 */}
-            {currentStep === 1 && (
-              <motion.div key="step1" className="step-content glass-card"
-                initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
-                <h2 className="step-title"><BookOpen size={22} /> 도서 정보 입력</h2>
-
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">제목 *</label>
-                    <input className="form-input" placeholder="작품 제목" value={metadata.title}
-                      onChange={e => updateMeta("title", e.target.value)} />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">저자명 *</label>
-                    <input className="form-input" placeholder="저자 이름 또는 필명" value={metadata.author}
-                      onChange={e => updateMeta("author", e.target.value)} />
-                  </div>
-                </div>
-
-                <div className="form-row">
-                  <div className="form-group">
-                    <label className="form-label">장르</label>
-                    <select className="form-input" value={metadata.genre}
-                      onChange={e => updateMeta("genre", e.target.value)}>
-                      {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
-                    </select>
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">언어</label>
-                    <select className="form-input" value={metadata.language}
-                      onChange={e => updateMeta("language", e.target.value)}>
-                      <option value="ko">한국어</option>
-                      <option value="en">영어</option>
-                      <option value="ja">일본어</option>
-                      <option value="zh">중국어</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">출판사명 (개인 출판사)</label>
-                  <input className="form-input" placeholder={`${metadata.author || "저자"} 독립출판`}
-                    value={metadata.publisherName}
-                    onChange={e => updateMeta("publisherName", e.target.value)} />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">작품 소개</label>
-                  <textarea className="form-input" rows="4" placeholder="작품에 대한 소개를 작성해주세요..."
-                    value={metadata.description}
-                    onChange={e => updateMeta("description", e.target.value)} />
-                </div>
-
-                {/* NFT 설정 */}
-                <div className="nft-settings glass-card">
-                  <h3><Zap size={18} /> NFT 설정</h3>
-
-                  <div className="form-group">
-                    <label className="form-label">로열티 (재판매 시 저자 수수료)</label>
-                    <div className="royalty-options">
-                      {ROYALTY_OPTIONS.map(opt => (
-                        <button
-                          key={opt.value}
-                          className={`royalty-btn ${metadata.royaltyPercent === opt.value ? "selected" : ""}`}
-                          onClick={() => updateMeta("royaltyPercent", opt.value)}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="form-group">
-                    <label className="toggle-label">
-                      <input type="checkbox" checked={metadata.isLimitedEdition}
-                        onChange={e => updateMeta("isLimitedEdition", e.target.checked)} />
-                      <span>한정판 발행</span>
-                    </label>
-                    {metadata.isLimitedEdition && (
-                      <div style={{ marginTop: "12px" }}>
-                        <label className="form-label">총 발행 부수</label>
-                        <input type="number" className="form-input" min="1" max="10000"
-                          value={metadata.totalEditions}
-                          onChange={e => updateMeta("totalEditions", parseInt(e.target.value))} />
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="step-nav-btns">
-                  <button className="btn btn-secondary" onClick={() => setCurrentStep(0)}>← 이전</button>
-                  <button className="btn btn-primary step-next-btn" onClick={generateEpub} disabled={isProcessing}>
-                    {isProcessing ? <><Loader size={16} className="spin" /> 생성 중...</> : <>EPUB 생성하기 <ChevronRight size={18} /></>}
-                  </button>
-                </div>
-              </motion.div>
-            )}
-
-            {/* STEP 2: EPUB 생성 완료 + IPFS 업로드 */}
-            {currentStep === 2 && epubResult && (
-              <motion.div key="step2" className="step-content glass-card"
-                initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
-                <h2 className="step-title"><Check size={22} className="success-icon" /> EPUB 생성 완료</h2>
-
-                <div className="result-card">
-                  <div className="result-item">
-                    <span>파일명</span><code>{epubResult.filename}</code>
-                  </div>
-                  <div className="result-item">
-                    <span>파일 크기</span><code>{(epubResult.fileSize / 1024).toFixed(1)} KB</code>
-                  </div>
-                  <div className="result-item">
-                    <span>챕터 수</span><code>{epubResult.chapters}개</code>
-                  </div>
-                </div>
-
-                <a href={epubResult.downloadUrl} download className="btn btn-secondary" style={{ marginBottom: "20px" }}>
-                  <BookOpen size={16} /> EPUB 다운로드
-                </a>
-
-                <div className="ipfs-section">
-                  <h3><Zap size={18} /> IPFS에 업로드</h3>
-                  <p className="info-text">
-                    EPUB 파일을 분산 저장소(IPFS)에 영구 보관하고 NFT 메타데이터를 생성합니다.
-                  </p>
-                  <div className="info-note">
-                    <AlertCircle size={14} />
-                    Pinata API 키가 없으면 데모 모드로 동작합니다.
-                  </div>
-                </div>
-
-                <div className="step-nav-btns">
-                  <button className="btn btn-secondary" onClick={() => setCurrentStep(1)}>← 이전</button>
-                  <button className="btn btn-primary step-next-btn" onClick={uploadToIPFS} disabled={isProcessing}>
-                    {isProcessing ? <><Loader size={16} className="spin" /> 업로드 중...</> : <>IPFS 업로드 & NFT 발행 준비 <ChevronRight size={18} /></>}
-                  </button>
-                </div>
-              </motion.div>
-            )}
-
-            {/* STEP 3: NFT 발행 */}
-            {currentStep === 3 && (
-              <motion.div key="step3" className="step-content glass-card"
-                initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}>
-                <h2 className="step-title"><Zap size={22} /> NFT 발행</h2>
-
-                {ipfsResult && (
-                  <div className="result-card">
-                    <div className="result-item">
-                      <span>EPUB IPFS</span>
-                      <a href={ipfsResult.epub.ipfsUrl} target="_blank" rel="noopener noreferrer">
-                        <code>{ipfsResult.epub.ipfsHash?.slice(0, 20)}...</code>
-                        <ExternalLink size={12} />
-                      </a>
-                    </div>
-                    <div className="result-item">
-                      <span>메타데이터 IPFS</span>
-                      <code>{ipfsResult.meta.ipfsHash?.slice(0, 20)}...</code>
-                    </div>
-                    {ipfsResult.epub.isDemoMode && (
-                      <div className="info-note" style={{ marginTop: "8px" }}>
-                        <AlertCircle size={14} />
-                        데모 모드: 실제 IPFS 대신 임시 해시 사용
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {mintedTokenId ? (
-                  <div className="mint-success">
-                    <div className="mint-success-icon">🎉</div>
-                    <h3>NFT 발행 완료!</h3>
-                    <p>Token ID: <strong>#{mintedTokenId}</strong></p>
-                    <p>제목: <strong>{metadata.title}</strong></p>
-                    <p>로열티: <strong>{(metadata.royaltyPercent / 100).toFixed(1)}%</strong></p>
-                  </div>
-                ) : (
-                  <>
-                    {!account ? (
-                      <div className="wallet-prompt">
-                        <AlertCircle size={24} />
-                        <p>NFT 발행을 위해 지갑 연결이 필요합니다.</p>
-                        <button className="btn btn-primary" onClick={connectWallet}>지갑 연결</button>
-                      </div>
-                    ) : (
-                      <button className="btn btn-primary mint-btn" onClick={mintNFT} disabled={isProcessing}>
-                        {isProcessing
-                          ? <><Loader size={18} className="spin" /> MetaMask 승인 대기 중...</>
-                          : <><Zap size={18} /> NFT 발행하기 (블록체인 기록)</>
-                        }
-                      </button>
-                    )}
-                  </>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-
-        {/* 오른쪽: 미리보기 사이드바 */}
-        <div className="publish-sidebar">
-          <div className="sidebar-preview glass-card">
-            <h3>발행 정보 요약</h3>
-            <div className="sidebar-cover">
-              {coverFile ? (
-                <img src={URL.createObjectURL(coverFile)} alt="표지" />
-              ) : (
-                <div className="sidebar-cover-placeholder"><BookOpen size={32} /></div>
-              )}
-            </div>
-            <div className="sidebar-info">
-              <p className="sidebar-title">{metadata.title || "제목 미입력"}</p>
-              <p className="sidebar-author">{metadata.author || "저자 미입력"}</p>
-              {metadata.genre && <span className="badge badge-primary">{metadata.genre}</span>}
-            </div>
-            <div className="sidebar-details">
-              {metadata.isLimitedEdition && (
-                <div className="detail-row">
-                  <span>한정판</span>
-                  <span>{metadata.totalEditions}부</span>
-                </div>
-              )}
-              <div className="detail-row">
-                <span>로열티</span>
-                <span>{(metadata.royaltyPercent / 100).toFixed(1)}%</span>
+        {/* ── 스텝 0: 문서 업로드 ── */}
+        {step === 0 && (
+          <motion.div key="s0" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }}>
+            <div
+              {...docRP()}
+              style={{
+                border: `2px dashed ${docDrag ? "#6366f1" : "rgba(99,102,241,0.35)"}`,
+                borderRadius: 20, padding: "64px 32px", textAlign: "center",
+                cursor: "pointer",
+                background: docDrag ? "rgba(99,102,241,0.08)" : "rgba(255,255,255,0.02)",
+                transition: "all 0.2s",
+              }}
+            >
+              <input {...docIP()} />
+              <Upload size={48} style={{ color: "#6366f1", marginBottom: 20 }} />
+              <h2 style={{ fontSize: "1.25rem", fontWeight: 600, marginBottom: 12 }}>
+                {docDrag ? "놓으세요!" : "문서 파일을 드래그하거나 클릭하세요"}
+              </h2>
+              <p style={{ color: "#9ca3af", marginBottom: 20 }}>
+                지원: <strong style={{ color: "#a5b4fc" }}>TXT · MD · DOCX · PDF · HTML</strong>
+              </p>
+              <div style={{
+                display: "inline-block", padding: "11px 32px", borderRadius: 12,
+                background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+                color: "#fff", fontWeight: 600, fontSize: "0.95rem",
+              }}>
+                파일 선택
               </div>
-              {docFile && (
-                <div className="detail-row">
-                  <span>원본 파일</span>
-                  <span>{docFile.name.slice(-20)}</span>
-                </div>
-              )}
+              <p style={{ color: "#6b7280", fontSize: "0.78rem", marginTop: 16 }}>
+                모든 처리는 브라우저 내에서만 이루어집니다
+              </p>
             </div>
-          </div>
-        </div>
-      </div>
+          </motion.div>
+        )}
 
-      <style>{`
-        .publish-page { padding: 48px 0 80px; }
-        .publish-header { text-align: center; margin-bottom: 48px; }
-        .publish-header h1 { font-size: 2.2rem; font-weight: 700; font-family: var(--font-serif); margin-bottom: 8px; }
-        .publish-header p { color: #a5b4fc; }
+        {/* ── 스텝 1: 도서 정보 입력 ── */}
+        {step === 1 && (
+          <motion.div key="s1" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }}>
+            {/* 선택된 파일 표시 */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 12,
+              padding: "11px 16px",
+              background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.25)",
+              borderRadius: 12, marginBottom: 24,
+            }}>
+              <FileText size={18} style={{ color: "#10b981" }} />
+              <span style={{ flex: 1, fontSize: "0.9rem" }}>{docFile?.name}</span>
+              <button
+                onClick={() => { setDocFile(null); setStep(0); }}
+                style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: "0.8rem" }}
+              >
+                변경
+              </button>
+            </div>
 
-        /* 스텝 인디케이터 */
-        .step-indicator {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          gap: 0;
-          margin-bottom: 48px;
-          flex-wrap: wrap;
-          gap: 4px;
-        }
-        .step-dot {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          gap: 6px;
-          position: relative;
-        }
-        .step-dot > span, .step-dot > svg {
-          width: 36px; height: 36px;
-          border-radius: 50%;
-          background: rgba(99,102,241,0.15);
-          border: 2px solid rgba(99,102,241,0.3);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 0.85rem;
-          font-weight: 600;
-          color: #6b7280;
-          transition: all 0.3s;
-        }
-        .step-dot.active > span, .step-dot.active > svg {
-          background: rgba(99,102,241,0.3);
-          border-color: #6366f1;
-          color: #a5b4fc;
-        }
-        .step-dot.done > span, .step-dot.done > svg {
-          background: #6366f1;
-          border-color: #6366f1;
-          color: white;
-        }
-        .step-dot-label {
-          position: absolute;
-          top: 42px;
-          font-size: 0.7rem;
-          color: #6b7280;
-          white-space: nowrap;
-        }
-        .step-dot.active .step-dot-label { color: #a5b4fc; }
-        .step-line {
-          width: 60px; height: 2px;
-          background: rgba(99,102,241,0.2);
-          margin-bottom: 24px;
-          transition: background 0.3s;
-        }
-        .step-line.done { background: #6366f1; }
+            <div style={{
+              background: "rgba(30,27,75,0.7)", border: "1px solid rgba(99,102,241,0.2)",
+              borderRadius: 20, padding: "28px 28px 32px",
+            }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
 
-        /* 레이아웃 */
-        .publish-layout {
-          display: grid;
-          grid-template-columns: 1fr 300px;
-          gap: 32px;
-          align-items: start;
-          margin-top: 48px;
-        }
+                {/* 제목 */}
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={lbl}>책 제목 *</label>
+                  <input style={inp} placeholder="예: 나의 첫 번째 시집"
+                    value={form.title} onChange={e => setField("title", e.target.value)} />
+                </div>
 
-        /* 콘텐츠 */
-        .step-content { padding: 32px; }
-        .step-title {
-          display: flex; align-items: center; gap: 12px;
-          font-size: 1.4rem; font-weight: 700;
-          margin-bottom: 8px;
-        }
-        .step-desc { color: #9ca3af; margin-bottom: 24px; }
-        .success-icon { color: #10b981; }
+                {/* 저자 */}
+                <div>
+                  <label style={lbl}>저자명 *</label>
+                  <input style={inp} placeholder="예: 홍길동"
+                    value={form.author} onChange={e => setField("author", e.target.value)} />
+                </div>
 
-        /* 드롭존 */
-        .dropzone {
-          border: 2px dashed rgba(99,102,241,0.4);
-          border-radius: 14px;
-          padding: 40px 20px;
-          text-align: center;
-          cursor: pointer;
-          transition: all 0.2s;
-          margin-bottom: 20px;
-          background: rgba(99,102,241,0.04);
-        }
-        .dropzone:hover, .dropzone.drag-active {
-          border-color: #6366f1;
-          background: rgba(99,102,241,0.1);
-        }
-        .dropzone.has-file { border-color: #10b981; background: rgba(16,185,129,0.05); }
-        .cover-dropzone { padding: 20px; }
-        .drop-icon { color: rgba(99,102,241,0.5); margin-bottom: 12px; }
-        .drop-prompt { display: flex; flex-direction: column; align-items: center; gap: 8px; color: #9ca3af; }
-        .drop-prompt strong { color: #6366f1; }
-        .drop-prompt span { font-size: 0.8rem; color: #6b7280; }
-        .drop-success { display: flex; flex-direction: column; align-items: center; gap: 8px; color: #10b981; }
-        .drop-check { color: #10b981; }
+                {/* 장르 */}
+                <div>
+                  <label style={lbl}>장르</label>
+                  <select style={inp} value={form.genre} onChange={e => setField("genre", e.target.value)}>
+                    {GENRES.map(g => <option key={g} value={g}>{g}</option>)}
+                  </select>
+                </div>
 
-        /* 미리보기 */
-        .preview-box {
-          background: rgba(0,0,0,0.2);
-          border-radius: 10px;
-          padding: 16px;
-          margin-bottom: 20px;
-        }
-        .preview-box h4 { font-size: 0.85rem; color: #a5b4fc; margin-bottom: 8px; }
-        .preview-box p { font-size: 0.85rem; color: #9ca3af; line-height: 1.7; }
+                {/* 언어 */}
+                <div>
+                  <label style={lbl}>언어</label>
+                  <select style={inp} value={form.language} onChange={e => setField("language", e.target.value)}>
+                    <option value="ko">한국어</option>
+                    <option value="en">English</option>
+                    <option value="ja">日本語</option>
+                    <option value="zh">中文</option>
+                  </select>
+                </div>
 
-        /* 폼 */
-        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-        .cover-section { margin-top: 4px; }
-        .cover-section h3 { display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 12px; color: #a5b4fc; }
+                {/* 소개글 */}
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={lbl}>책 소개 (선택)</label>
+                  <textarea style={{ ...inp, minHeight: 72, resize: "vertical" }}
+                    placeholder="독자에게 전하고 싶은 소개글"
+                    value={form.description} onChange={e => setField("description", e.target.value)} />
+                </div>
 
-        /* NFT 설정 */
-        .nft-settings {
-          padding: 20px;
-          margin-top: 8px;
-        }
-        .nft-settings h3 { display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 16px; color: #a5b4fc; }
-        .royalty-options { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-        .royalty-btn {
-          padding: 8px 20px;
-          border-radius: 8px;
-          background: rgba(99,102,241,0.1);
-          border: 1px solid rgba(99,102,241,0.3);
-          color: #a5b4fc;
-          cursor: pointer;
-          transition: all 0.2s;
-          font-size: 0.95rem;
-        }
-        .royalty-btn.selected {
-          background: rgba(99,102,241,0.3);
-          border-color: #6366f1;
-          color: white;
-        }
-        .toggle-label {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          cursor: pointer;
-          font-size: 0.95rem;
-        }
-        .toggle-label input { width: 18px; height: 18px; cursor: pointer; accent-color: #6366f1; }
+                {/* 표지 */}
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label style={{ ...lbl, marginBottom: 10 }}>표지 이미지 (선택)</label>
+                  <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+                    <div
+                      {...covRP()}
+                      style={{
+                        width: 100, height: 136, borderRadius: 8, overflow: "hidden",
+                        border: "2px dashed rgba(99,102,241,0.35)",
+                        background: "rgba(255,255,255,0.02)",
+                        cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                        flexShrink: 0,
+                      }}
+                    >
+                      <input {...covIP()} />
+                      {coverPreviewUrl
+                        ? <img src={coverPreviewUrl} alt="표지" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        : <div style={{ textAlign: "center", color: "#6b7280" }}>
+                            <Image size={24} style={{ marginBottom: 4 }} />
+                            <p style={{ fontSize: "0.7rem" }}>클릭</p>
+                          </div>
+                      }
+                    </div>
+                    <div style={{ color: "#9ca3af", fontSize: "0.82rem", paddingTop: 4 }}>
+                      <p>JPG · PNG · WebP 지원</p>
+                      <p style={{ marginTop: 4 }}>선택하지 않으면 기본 표지가 사용됩니다.</p>
+                      {coverPreviewUrl && (
+                        <button onClick={() => { setCoverFile(null); setCoverPreviewUrl(null); }}
+                          style={{ marginTop: 8, background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: "0.8rem" }}>
+                          표지 제거
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
 
-        /* 결과 카드 */
-        .result-card {
-          background: rgba(0,0,0,0.2);
-          border-radius: 10px;
-          padding: 16px;
-          margin-bottom: 20px;
-        }
-        .result-item {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 8px 0;
-          border-bottom: 1px solid rgba(255,255,255,0.05);
-          font-size: 0.9rem;
-          gap: 12px;
-        }
-        .result-item:last-child { border-bottom: none; }
-        .result-item span { color: #9ca3af; flex-shrink: 0; }
-        .result-item code { font-size: 0.82rem; color: #a5b4fc; word-break: break-all; }
-        .result-item a { display: flex; align-items: center; gap: 4px; }
+            {/* 버튼 */}
+            <div style={{ display: "flex", gap: 12, marginTop: 20 }}>
+              <button onClick={() => setStep(0)} style={secBtn}>
+                <ChevronLeft size={16} /> 이전
+              </button>
+              <button
+                onClick={handleGenerate}
+                disabled={isGenerating || !form.title.trim() || !form.author.trim()}
+                style={{ ...priBtn, flex: 1, justifyContent: "center", opacity: (!form.title.trim() || !form.author.trim()) ? 0.5 : 1 }}
+              >
+                {isGenerating
+                  ? <><Loader size={18} style={{ animation: "spin 0.8s linear infinite" }} /> 생성 중...</>
+                  : <><BookOpen size={18} /> EPUB 생성하기 <ChevronRight size={16} /></>
+                }
+              </button>
+            </div>
 
-        /* 버튼 */
-        .step-nav-btns { display: flex; gap: 12px; margin-top: 24px; }
-        .step-next-btn { flex: 1; justify-content: center; }
-        .mint-btn { width: 100%; justify-content: center; padding: 16px; font-size: 1rem; }
+            {isGenerating && (
+              <p style={{ textAlign: "center", color: "#a5b4fc", fontSize: "0.82rem", marginTop: 12 }}>
+                PDF/DOCX는 최대 30초 소요될 수 있습니다
+              </p>
+            )}
+          </motion.div>
+        )}
 
-        /* 정보 노트 */
-        .info-text { color: #9ca3af; font-size: 0.9rem; margin-bottom: 12px; line-height: 1.7; }
-        .info-note {
-          display: flex; align-items: center; gap: 8px;
-          color: #f59e0b; font-size: 0.82rem;
-          background: rgba(245,158,11,0.1);
-          padding: 8px 12px;
-          border-radius: 8px;
-        }
-        .ipfs-section h3 { display: flex; align-items: center; gap: 8px; font-size: 1rem; margin-bottom: 12px; color: #a5b4fc; }
+        {/* ── 스텝 2: 완료 ── */}
+        {step === 2 && epubResult && (
+          <motion.div key="s2" initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }}>
+            <div style={{
+              background: "rgba(16,185,129,0.07)", border: "1px solid rgba(16,185,129,0.3)",
+              borderRadius: 20, padding: "40px 28px", textAlign: "center", marginBottom: 20,
+            }}>
+              <div style={{
+                width: 68, height: 68, borderRadius: "50%",
+                background: "rgba(16,185,129,0.15)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                margin: "0 auto 18px",
+              }}>
+                <Check size={32} style={{ color: "#10b981" }} />
+              </div>
+              <h2 style={{ fontSize: "1.5rem", fontWeight: 700, marginBottom: 6 }}>EPUB 완성!</h2>
+              <p style={{ color: "#a5b4fc", marginBottom: 2 }}><strong>{epubResult.filename}</strong></p>
+              <p style={{ color: "#6b7280", fontSize: "0.82rem", marginBottom: 24 }}>
+                {epubResult.chapters}개 챕터 · {(epubResult.blob.size / 1024).toFixed(0)} KB
+              </p>
+              <button onClick={handleDownload} style={{ ...priBtn, fontSize: "1.05rem", padding: "14px 44px" }}>
+                <Download size={20} /> EPUB 다운로드
+              </button>
+              <p style={{ color: "#6b7280", fontSize: "0.78rem", marginTop: 14 }}>
+                리디북스 · 알라딘 · Apple Books · Calibre에서 바로 열 수 있습니다
+              </p>
+            </div>
 
-        /* 민트 성공 */
-        .mint-success {
-          text-align: center;
-          padding: 32px;
-          background: rgba(16,185,129,0.1);
-          border: 1px solid rgba(16,185,129,0.3);
-          border-radius: 14px;
-        }
-        .mint-success-icon { font-size: 3rem; margin-bottom: 16px; }
-        .mint-success h3 { color: #10b981; font-size: 1.4rem; margin-bottom: 12px; }
-        .mint-success p { color: #9ca3af; margin-bottom: 4px; }
-        .wallet-prompt {
-          text-align: center;
-          padding: 32px;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          gap: 16px;
-          color: #f59e0b;
-        }
+            {/* 사용법 안내 */}
+            <div style={{
+              background: "rgba(30,27,75,0.5)", border: "1px solid rgba(99,102,241,0.15)",
+              borderRadius: 16, padding: "18px 22px", marginBottom: 16,
+            }}>
+              <p style={{ fontWeight: 600, fontSize: "0.9rem", color: "#a5b4fc", marginBottom: 10 }}>EPUB 여는 방법</p>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {[
+                  ["📱 스마트폰", "리디북스 앱 → 내 파일"],
+                  ["🍎 아이폰/아이패드", "파일 앱에서 열기"],
+                  ["💻 PC", "Calibre (무료 앱)"],
+                  ["📚 전자책 단말기", "USB로 복사 후 열기"],
+                ].map(([k, v]) => (
+                  <div key={k} style={{ fontSize: "0.82rem" }}>
+                    <span style={{ fontWeight: 600 }}>{k}</span>
+                    <br />
+                    <span style={{ color: "#9ca3af" }}>{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
 
-        /* 사이드바 */
-        .publish-sidebar { position: sticky; top: 80px; }
-        .sidebar-preview { padding: 24px; }
-        .sidebar-preview h3 { font-size: 0.95rem; color: #a5b4fc; margin-bottom: 16px; font-weight: 600; }
-        .sidebar-cover {
-          width: 100%; aspect-ratio: 3/4;
-          border-radius: 10px;
-          overflow: hidden;
-          margin-bottom: 16px;
-          background: linear-gradient(135deg, #1a1730, #312e81);
-        }
-        .sidebar-cover img { width: 100%; height: 100%; object-fit: cover; }
-        .sidebar-cover-placeholder {
-          width: 100%; height: 100%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          color: rgba(99,102,241,0.3);
-        }
-        .sidebar-info { margin-bottom: 16px; }
-        .sidebar-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 4px; font-family: var(--font-serif); }
-        .sidebar-author { font-size: 0.85rem; color: #a5b4fc; margin-bottom: 8px; }
-        .sidebar-details {}
-        .detail-row {
-          display: flex;
-          justify-content: space-between;
-          padding: 6px 0;
-          border-bottom: 1px solid rgba(255,255,255,0.05);
-          font-size: 0.85rem;
-        }
-        .detail-row span:first-child { color: #9ca3af; }
+            {/* NFT 옵션 */}
+            <div style={{
+              background: "rgba(99,102,241,0.05)", border: "1px solid rgba(99,102,241,0.18)",
+              borderRadius: 16, padding: "18px 22px",
+            }}>
+              <p style={{ fontWeight: 600, fontSize: "0.9rem", color: "#a5b4fc", marginBottom: 6 }}>
+                블록체인 저작권 등록 (선택사항)
+              </p>
+              <p style={{ color: "#9ca3af", fontSize: "0.82rem", marginBottom: 12 }}>
+                MetaMask 지갑 연결 후 EPUB을 NFT로 등록해 저작권을 블록체인에 기록할 수 있습니다.
+              </p>
+              {account
+                ? <p style={{ color: "#10b981", fontSize: "0.82rem" }}>✓ 지갑 연결됨 — NFT 거래소에서 판매 등록 가능</p>
+                : <button onClick={connectWallet} style={secBtn}><Wallet size={15} /> MetaMask 연결</button>
+              }
+            </div>
 
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-        .spin { animation: spin 0.8s linear infinite; }
+            <div style={{ textAlign: "center", marginTop: 20 }}>
+              <button
+                onClick={() => {
+                  setStep(0); setDocFile(null); setCoverFile(null);
+                  setCoverPreviewUrl(null); setEpubResult(null);
+                  setForm({ title: "", author: "", genre: "소설", description: "", language: "ko" });
+                }}
+                style={{ background: "none", border: "none", color: "#6b7280", cursor: "pointer", fontSize: "0.88rem" }}
+              >
+                + 새 파일 변환하기
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-        @media (max-width: 900px) {
-          .publish-layout { grid-template-columns: 1fr; }
-          .publish-sidebar { display: none; }
-          .form-row { grid-template-columns: 1fr; }
-        }
-      `}</style>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 }
+
+const lbl = { display: "block", marginBottom: 5, fontSize: "0.83rem", color: "#a5b4fc", fontWeight: 500 };
+const inp = {
+  width: "100%", padding: "10px 13px",
+  background: "rgba(255,255,255,0.05)", border: "1px solid rgba(99,102,241,0.3)",
+  borderRadius: 10, color: "#e0e7ff", fontSize: "0.93rem",
+  outline: "none", fontFamily: "var(--font-sans)",
+};
+const priBtn = {
+  display: "inline-flex", alignItems: "center", gap: 8,
+  padding: "12px 26px", borderRadius: 12,
+  background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+  color: "#fff", border: "none", fontWeight: 600, fontSize: "0.95rem", cursor: "pointer",
+};
+const secBtn = {
+  display: "inline-flex", alignItems: "center", gap: 8,
+  padding: "10px 18px", borderRadius: 12,
+  background: "rgba(255,255,255,0.05)",
+  color: "#a5b4fc", border: "1px solid rgba(99,102,241,0.3)",
+  fontWeight: 500, fontSize: "0.9rem", cursor: "pointer",
+};
