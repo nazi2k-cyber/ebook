@@ -1,0 +1,38 @@
+# 환경변수 (절대 커밋하지 마세요!)
+.env
+.env.local
+.env.*.local
+
+# 의존성
+node_modules/
+*/node_modules/
+
+# 빌드 결과물
+dist/
+build/
+.next/
+
+# 하드햇 캐시 및 아티팩트
+contracts/cache/
+contracts/artifacts/
+contracts/deployments/
+
+# 업로드 및 생성 파일
+uploads/
+epub-output/
+*.epub
+
+# 로그
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# 테스트 커버리지
+coverage/

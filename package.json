@@ -1,0 +1,22 @@
+{
+  "name": "blockchain-ebook-nft-platform",
+  "version": "1.0.0",
+  "description": "블록체인 기반 1인 독립출판 ebook 플랫폼 - epub 생성 + NFT 저작권 거래소",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && npm run dev",
+    "compile": "cd contracts && npx hardhat compile",
+    "test:contracts": "cd contracts && npx hardhat test",
+    "deploy:local": "cd contracts && npx hardhat run scripts/deploy.js --network localhost",
+    "node:local": "cd contracts && npx hardhat node"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

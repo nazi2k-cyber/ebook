@@ -1,0 +1,32 @@
+{
+  "name": "ebook-platform-backend",
+  "version": "1.0.0",
+  "description": "Backend API for blockchain ebook platform",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1",
+    "epub-gen-memory": "^1.0.4",
+    "mammoth": "^1.6.0",
+    "pdf-parse": "^1.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express-rate-limit": "^7.1.5",
+    "helmet": "^7.1.0",
+    "archiver": "^6.0.1",
+    "sharp": "^0.33.2",
+    "uuid": "^9.0.1",
+    "morgan": "^1.10.0",
+    "axios": "^1.6.7",
+    "form-data": "^4.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3",
+    "jest": "^29.7.0"
+  }
+}
